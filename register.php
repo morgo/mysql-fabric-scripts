@@ -32,10 +32,10 @@ if (!$fabric_group) {
  die();
 }
 
-shell_exec("/usr/bin/mysqlfabric group add $fabric_group $server:3306\n");
+echo shell_exec("/usr/bin/mysqlfabric group add $fabric_group $server:3306\n");
 
 if (empty($servers_in_group)) {
- shell_exec("/usr/bin/mysqlfabric group promote $fabric_group\n");
+ echo shell_exec("/usr/bin/mysqlfabric group promote $fabric_group\n");
 }
 
 ?>

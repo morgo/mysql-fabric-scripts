@@ -3,7 +3,9 @@
 /*
 
 Example Usage:
-php fabric.cfn.php  > stack.json && aws cloudformation create-stack --stack-name fabric1 --template-body file://stack.json  --parameters ParameterKey=AccessKey,ParameterValue=AKIAXXXXXXX ParameterKey=SecretKey,ParameterValue=JEp2xZXXXXXX ParameterKey=KeypairName,ParameterValue=ec2-keypair
+php fabric.cfn.php  > stack.json && aws cloudformation create-stack --stack-name fabric1 \
+--template-body file://stack.json  --parameters ParameterKey=AccessKey,ParameterValue=AKIAXXXXXXX \
+ParameterKey=SecretKey,ParameterValue=JEp2xZXXXXXX ParameterKey=KeypairName,ParameterValue=ec2-keypair
 
 */
 
@@ -49,8 +51,7 @@ print create_template(array(
 				'KeyName' => array('Ref' => 'KeypairName'),
 				'UserData' => array('Fn::Base64' => array("Fn::Join" => array("", array("#!/bin/bash
 
-ln -s \$0 /var/lib/cloud/data/scripts/bootstrap.sh
-mkdir -p /var/lib/cloud/bootstrap
+ln -s \$0 /var/lib/cloud/bootstrap.sh
 
 export FABRIC_MYSQL_DATABASE_NAME='fabric'
 export FABRIC_MYSQL_USER='fabric'
@@ -59,16 +60,9 @@ export FABRIC_MYSQL_PASSWORD='secret'
 # 1. Configure MySQL as a local backing store from Oracle official repos.
 
 yum localinstall -y http://dev.mysql.com/get/mysql-community-release-el6-5.noarch.rpm
-yum install -y mysql-community-server
+yum install -y mysql-community-server mysql-utilities mysql-connector-python
 service mysqld start
 chkconfig mysqld on
-
-yum localinstall -y http://dev.mysql.com/get/Downloads/Connector-Python/mysql-connector-python-1.2.1-1.el6.noarch.rpm
-yum localinstall -y http://dev.mysql.com/get/Downloads/MySQLGUITools/mysql-utilities-1.4.2-1.el6.noarch.rpm
-
-
-# Setup the Fabric backing-store database username, password:
-mysqladmin create \$FABRIC_MYSQL_DATABASE_NAME
 
 mysql -e \"CREATE USER '\$FABRIC_MYSQL_USER'@'localhost' IDENTIFIED BY '\$FABRIC_MYSQL_PASSWORD';\"
 mysql -e \"GRANT ALL ON \$FABRIC_MYSQL_DATABASE_NAME.* TO '\$FABRIC_MYSQL_USER'@'localhost';\"
@@ -136,8 +130,23 @@ EOF
 mysqlfabric manage setup
 
 # Start Fabric Daemon
-# @TODO: Should be in init script.
-mysqlfabric manage start --daemonize
+# Daemonize is broken by BUG #72818
+# So nest it inside of supervisord for startup/process monitoring.
+
+easy_install supervisor
+echo_supervisord_conf > /etc/supervisord.conf
+
+cat >> /etc/supervisord.conf << EOF
+
+[program:mysqlfabricd]
+command=mysqlfabric manage start
+
+EOF
+
+# start supervisord
+supervisord -c /etc/supervisord.conf
+
+sleep 3
 
 # Create the global MySQL Fabric Group
 mysqlfabric group create GLOBAL1
@@ -151,6 +160,8 @@ region = us-east-1
 EOF
 
 # Start a webserver on port 8000 to listen for HA group GLOBAL1 to phone home on.
+# Eventually this could be replaced by the xmlrpc protocol.
+
 yum install -y php54
 
 mkdir -p /usr/local/bin/scripts/
