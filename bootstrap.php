@@ -65,6 +65,9 @@ if (empty($servers_in_group)) {
  echo "# Restoring backup\n";
  echo "mysql < /tmp/backup.sql\n";
 
+ echo "# Running FLUSH PRIVILEGES\n"; # restoring backup creates fabric grant, but as INSERT statement - so it will not be active.
+ echo "mysql -e 'FLUSH PRIVILEGES';\n";
+
  echo "# Change master to MASTER_HOST\n";
  echo "echo \"CHANGE MASTER TO MASTER_HOST='$peer_host', MASTER_PORT=$peer_port, MASTER_USER='fabric', MASTER_PASSWORD='secret'\" | mysql\n";
 
