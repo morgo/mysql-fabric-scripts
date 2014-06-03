@@ -1,0 +1,101 @@
+{
+    "Description": "Fabric master plus single HA group containing 1 initial node",
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "KeypairName": {
+            "Type": "String",
+            "Default": "ec2-keypair",
+            "Description": "Keypair to boot instances with"
+        },
+        "AccessKey": {
+            "Type": "String",
+            "Default": "",
+            "Description": "Access Key used to by master to get meta-data on incoming requests"
+        },
+        "SecretKey": {
+            "Type": "String",
+            "Default": "",
+            "Description": "Secret Key used to by master to get meta-data on incoming requests",
+            "NoEcho": "true"
+        }
+    },
+    "Resources": {
+        "fabricmaster": {
+            "Type": "AWS::EC2::Instance",
+            "Properties": {
+                "InstanceType": "m1.small",
+                "ImageId": "ami-fb8e9292",
+                "KeyName": {
+                    "Ref": "KeypairName"
+                },
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "#!\/bin\/bash\n\nln -s $0 \/var\/lib\/cloud\/data\/scripts\/bootstrap.sh\nmkdir -p \/var\/lib\/cloud\/bootstrap\n\nexport FABRIC_MYSQL_DATABASE_NAME='fabric'\nexport FABRIC_MYSQL_USER='fabric'\nexport FABRIC_MYSQL_PASSWORD='secret'\n\n# 1. Configure MySQL as a local backing store from Oracle official repos.\n\nyum localinstall -y http:\/\/dev.mysql.com\/get\/mysql-community-release-el6-5.noarch.rpm\nyum install -y mysql-community-server\nservice mysqld start\nchkconfig mysqld on\n\nyum localinstall -y http:\/\/dev.mysql.com\/get\/Downloads\/Connector-Python\/mysql-connector-python-1.2.1-1.el6.noarch.rpm\nyum localinstall -y http:\/\/dev.mysql.com\/get\/Downloads\/MySQLGUITools\/mysql-utilities-1.4.2-1.el6.noarch.rpm\n\n\n# Setup the Fabric backing-store database username, password:\nmysqladmin create $FABRIC_MYSQL_DATABASE_NAME\n\nmysql -e \"CREATE USER '$FABRIC_MYSQL_USER'@'localhost' IDENTIFIED BY '$FABRIC_MYSQL_PASSWORD';\"\nmysql -e \"GRANT ALL ON $FABRIC_MYSQL_DATABASE_NAME.* TO '$FABRIC_MYSQL_USER'@'localhost';\"\n\n# I'm not sure what was there, but we need to write out a fabric config\n# File with this secret password\n\ncat > \/etc\/mysql\/fabric.cfg << EOF\n[DEFAULT]\nprefix =\nsysconfdir = \/etc\nlogdir = \/var\/log\n\n[logging]\nurl = file:\/\/\/var\/log\/fabric.log\nlevel = INFO\n\n[storage]\nauth_plugin = mysql_native_password\ndatabase = $FABRIC_MYSQL_DATABASE_NAME\nuser = $FABRIC_MYSQL_USER\naddress = localhost:3306\nconnection_delay = 1\nconnection_timeout = 6\npassword = secret\nconnection_attempts = 6\n\n[failure_tracking]\nnotification_interval = 60\nnotification_clients = 50\ndetection_timeout = 1\ndetection_interval = 6\nnotifications = 300\ndetections = 3\nfailover_interval = 0\nprune_time = 3600\n\n[servers]\nuser = $FABRIC_MYSQL_USER\npassword = $FABRIC_MYSQL_PASSWORD\n\n[connector]\nttl = 1\n\n[protocol.xmlrpc]\ndisable_authentication = no\nssl_cert =\nrealm = MySQL Fabric\nssl_key =\nssl_ca =\nthreads = 5\nuser = admin\npassword = $FABRIC_MYSQL_PASSWORD\naddress = localhost:32274\n\n[executor]\nexecutors = 5\n\n[sharding]\nmysqldump_program = \/usr\/bin\/mysqldump\nmysqlclient_program = \/usr\/bin\/mysql\nEOF\n\n# Initialize Fabric Structure.\nmysqlfabric manage setup\n\n# Start Fabric Daemon\n# @TODO: Should be in init script.\nmysqlfabric manage start --daemonize\n\n# Create the global MySQL Fabric Group\nmysqlfabric group create GLOBAL1\n\nmkdir -p \/root\/.aws\/\ncat > \/root\/.aws\/config << EOF\n[default]\naws_access_key_id = ",
+                                {
+                                    "Ref": "AccessKey"
+                                },
+                                "\naws_secret_access_key = ",
+                                {
+                                    "Ref": "SecretKey"
+                                },
+                                "\nregion = us-east-1\nEOF\n\n# Start a webserver on port 8000 to listen for HA group GLOBAL1 to phone home on.\nyum install -y php54\n\nmkdir -p \/usr\/local\/bin\/scripts\/\ncat > \/usr\/local\/bin\/scripts\/bootstrap.php << EOF\n<?php\n\n\/*\n Looks up the instance that is requesting this page, and then determines\n how to create a custom bootstrap to respond.\n*\/\n\nfunction find_my_fabric_ha_group(\\$server) {\n \\$metadata = json_decode(shell_exec(\"aws ec2 describe-instances --filters Name=private-ip-address,Values=\\$server\"));\n foreach(\\$metadata->Reservations[0]->Instances[0]->Tags as \\$array) {\n  if (\\$array->Key=='FABRIC_GROUP') {\n   return \\$array->Value;\n  }\n }\n}\n\nfunction find_servers_in_fabric_group(\\$group_name) {\n \/\/ http:\/\/bugs.mysql.com\/bug.php?id=71445 : NOT Valid JSON\n \\$metadata = str_replace(\"  return      =\", \"\", shell_exec(\"\/usr\/bin\/mysqlfabric group lookup_servers \\$group_name | grep 'return      ='\"));\n \\$metadata = str_replace(\"'\", '\"', \\$metadata); \/\/ JSON requires double-quotes.\n return json_decode(\\$metadata, true);\n}\n\n\/\/ ----------------------------------------------------------------------\n\n\\$server = \\$_SERVER['REMOTE_ADDR'];\n\\$fabric_group = find_my_fabric_ha_group(\\$server);\n\nif (!\\$fabric_group) {\n echo \"Sorry, could not find a Fabric Group that this server belongs to!\";\n die();\n}\n\n\/*\n Find the current state of the fabric group.\n If there are no instances in the group, then I can bootstrap myself empty\n and automatically join it.\n*\/\n\n\\$servers_in_group = find_servers_in_fabric_group(\\$fabric_group);\n\nif (empty(\\$servers_in_group)) {\n\n echo \"# Allowing fabric access\\n\";\n echo \"mysql -e \\\"CREATE USER 'fabric'@'%' IDENTIFIED BY 'secret';\\\"\\n\";\n echo \"mysql -e \\\"GRANT ALL ON *.* TO 'fabric'@'%';\\\"\\n\";\n \n echo \"# Sending Intructions to Register\\n\";\n echo \"source  \/etc\/fabric-master-host\\n\";\n echo 'curl --silent http:\/\/\\$FABRIC_MASTER_HOST:8000\/register.php' . \"\\n\";\n\n} else {\n\n \/*\n  This is the second use-case.  We need to find a machine and create a mysqldump\n  from it, becoming a slave of it.\n *\/\n\n echo \"# Other servers exist in group - finding suitable candidate to export data from\\n\";\n echo \"# Piping in backup directly from a peer\\n\";\n \\$peer = \\$servers_in_group[0]['address'];\n list(\\$peer_host, \\$peer_port) = explode(\":\", \\$peer);\n echo \"mysqldump --single-transaction -h\\$peer_host -P \\$peer_port --master-data=1 -ufabric -psecret --all-databases --triggers --routines --events > \/tmp\/backup.sql\\n\";\n\n echo \"# Restoring backup\\n\";\n echo \"mysql < \/tmp\/backup.sql\\n\";\n\n echo \"# Change master to MASTER_HOST\\n\";\n echo \"echo \\\"CHANGE MASTER TO MASTER_HOST='\\$peer_host', MASTER_PORT=\\$peer_port, MASTER_USER='fabric', MASTER_PASSWORD='secret'\\\" | mysql\\n\";\n\n echo \"# Starting Slave\\n\";\n echo \"mysql -e 'START SLAVE';\\n\";\n\n echo \"# Sending Intructions to Register\\n\";\n echo \"source  \/etc\/fabric-master-host\\n\";\n echo 'curl --silent http:\/\/\\$FABRIC_MASTER_HOST:8000\/register.php' . \"\\n\";\n\n}\n\nEOF\n\ncat > \/usr\/local\/bin\/scripts\/register.php << EOF\n<?php\n\n\/*\n Looks up the instance that is requesting this page, and then determines\n how to create a custom bootstrap to respond.\n*\/\n\nfunction find_my_fabric_ha_group(\\$server) {\n \\$metadata = json_decode(shell_exec(\"aws ec2 describe-instances --filters Name=private-ip-address,Values=\\$server\"));\n foreach(\\$metadata->Reservations[0]->Instances[0]->Tags as \\$array) {\n  if (\\$array->Key=='FABRIC_GROUP') {\n   return \\$array->Value;\n  }\n }\n}\n\nfunction find_servers_in_fabric_group(\\$group_name) {\n \/\/ http:\/\/bugs.mysql.com\/bug.php?id=71445 : NOT Valid JSON\n \\$metadata = str_replace(\"  return      =\", \"\", shell_exec(\"\/usr\/bin\/mysqlfabric group lookup_servers \\$group_name | grep 'return      ='\"));\n \\$metadata = str_replace(\"'\", '\"', \\$metadata); \/\/ JSON requires double-quotes.\n return json_decode(\\$metadata, true);\n}\n\n\/\/ ----------------------------------------------------------------------\n\n\\$server = \\$_SERVER['REMOTE_ADDR'];\n\\$fabric_group = find_my_fabric_ha_group(\\$server);\n\\$servers_in_group = find_servers_in_fabric_group(\\$fabric_group);\n\nif (!\\$fabric_group) {\n echo \"Sorry, could not find a Fabric Group that this server belongs to!\";\n die();\n}\n\nshell_exec(\"\/usr\/bin\/mysqlfabric group add \\$fabric_group \\$server:3306\\n\");\n\nif (empty(\\$servers_in_group)) {\n shell_exec(\"\/usr\/bin\/mysqlfabric group promote \\$fabric_group\\n\");\n}\n\n?>\nEOF\n\ncat > \/usr\/local\/bin\/bootstrap-start.sh << EOF\ncd \/usr\/local\/bin\/scripts\nphp -S 0.0.0.0:8000 2>&1 >> \/tmp\/error.txt\nEOF\n\nsh \/usr\/local\/bin\/bootstrap-start.sh &\n\n"
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "fabricglobal1LC": {
+            "Type": "AWS::AutoScaling::LaunchConfiguration",
+            "Properties": {
+                "InstanceType": "m1.small",
+                "ImageId": "ami-fb8e9292",
+                "KeyName": {
+                    "Ref": "KeypairName"
+                },
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "#!\/bin\/bash\ncat > \/etc\/fabric-master-host << EOF\nexport FABRIC_MASTER_HOST='",
+                                {
+                                    "Fn::GetAtt": [
+                                        "fabricmaster",
+                                        "PrivateIp"
+                                    ]
+                                },
+                                "'\nEOF\n\nyum localinstall -y http:\/\/dev.mysql.com\/get\/mysql-community-release-el6-5.noarch.rpm\nyum install -y mysql-community-server\n\n# Write a new my.cnf file, since patching the existing one is difficult.\n# Configure GTIDs, binlogging, log-slave-updates, server-id and enforce-gtid-consistency\n\ncat > \/etc\/my.cnf << EOF\n# For advice on how to change settings please see\n# http:\/\/dev.mysql.com\/doc\/refman\/5.6\/en\/server-configuration-defaults.html\n\n[mysqld_safe]\nlog-error=\/var\/log\/mysqld.log\npid-file=\/var\/run\/mysqld\/mysqld.pid\n\n[mysqld]\n#\n# Remove leading # and set to the amount of RAM for the most important data\n# cache in MySQL. Start at 70% of total RAM for dedicated server, else 10%.\n# innodb_buffer_pool_size = 128M\n#\n# Remove leading # to turn on a very important data integrity option: logging\n# changes to the binary log between backups.\n# log_bin\n#\n# Remove leading # to set options mainly useful for reporting servers.\n# The server defaults are faster for transactions and fast SELECTs.\n# Adjust sizes as needed, experiment to find the optimal values.\n# join_buffer_size = 128M\n# sort_buffer_size = 2M\n# read_rnd_buffer_size = 2M\ndatadir=\/var\/lib\/mysql\nsocket=\/var\/lib\/mysql\/mysql.sock\n\n# Disabling symbolic-links is recommended to prevent assorted security risks\nsymbolic-links=0\n\n# Recommended in standard MySQL setup\nsql_mode=NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES\n\n# Fabric specific settings\ngtid_mode=ON\nlog-bin\nlog-slave-updates\nenforce-gtid-consistency\n\nEOF\n\nservice mysqld start\nchkconfig mysqld on\n\n# Generate a unique server ID from our IPv4 Address\n# This is a bit of a hack, but should work with one local IP address on AWS.\n\nIPADDRESS=`ifconfig | grep 'inet addr' | grep -v '127.0.0.1' | awk '{print $2}' | sed 's\/addr:\/\/'`;\nSERVERID=`mysql -BNe \"select inet_aton('$IPADDRESS');\"`\necho \"server-id=$SERVERID\" >> \/etc\/my.cnf\nmysql -e \"SET GLOBAL server_id=$SERVERID\"\n\n# Basic Initialization is complete.  Bootstrap back to the fabric daemon \n# in the background, so as to not fail the health check.  There may be\n# a long wait, since it's possible that the master itself may be taking a while\n# to come online.\n\ncat > \/usr\/local\/bin\/bootstrap-from-fabric-master.sh << EOF\n#!\/bin\/sh\nsource  \/etc\/fabric-master-host\n\nwhile true; do\n curl --silent http:\/\/\\$FABRIC_MASTER_HOST:8000\/bootstrap.php  > \/tmp\/bootstrap.sh\n rc=\\$?\n if [[ \\$rc -eq 0 ]] ; then\n  break; \/\/ Master is up, continue\n fi\n  echo \"Sleeping 10 seconds - waiting for the master to come up...\";\n  sleep 10;\ndone;\n\n# Execute the one-time bootstrap that the master has sent to us.\nsh \/tmp\/bootstrap.sh\n\nEOF\n\nsh \/usr\/local\/bin\/bootstrap-from-fabric-master.sh &"
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "fabricglobalASG": {
+            "Type": "AWS::AutoScaling::AutoScalingGroup",
+            "Properties": {
+                "LaunchConfigurationName": {
+                    "Ref": "fabricglobal1LC"
+                },
+                "MinSize": 1,
+                "MaxSize": 1,
+                "AvailabilityZones": [
+                    "us-east-1b",
+                    "us-east-1d",
+                    "us-east-1e"
+                ],
+                "Tags": [
+                    {
+                        "Key": "FABRIC_GROUP",
+                        "Value": "GLOBAL1",
+                        "PropagateAtLaunch": "true"
+                    }
+                ]
+            }
+        }
+    }
+}
