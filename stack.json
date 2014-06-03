@@ -83,11 +83,9 @@
                 },
                 "MinSize": 1,
                 "MaxSize": 1,
-                "AvailabilityZones": [
-                    "us-east-1b",
-                    "us-east-1d",
-                    "us-east-1e"
-                ],
+                "AvailabilityZones": {
+                    "Fn::GetAZs": "us-east-1"
+                },
                 "Tags": [
                     {
                         "Key": "FABRIC_GROUP",

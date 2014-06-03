@@ -285,7 +285,7 @@ sh /usr/local/bin/bootstrap-from-fabric-master.sh &")))),
 				'LaunchConfigurationName' => array('Ref' => 'fabricglobal1LC'),
 				'MinSize' => 1,
 				'MaxSize' => 1,
-				'AvailabilityZones' => array('us-east-1b', 'us-east-1d', 'us-east-1e'),
+				'AvailabilityZones' => array('Fn::GetAZs' => 'us-east-1'),
 				'Tags' => array(array(
 					'Key' => 'FABRIC_GROUP',
 					'Value' => 'GLOBAL1',
